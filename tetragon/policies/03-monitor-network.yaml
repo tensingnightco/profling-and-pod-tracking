@@ -1,0 +1,139 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-network-connections
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: network
+spec:
+  # Monitor outbound network connections (potential C&C, data exfil)
+  # Use case: Detect lateral movement, unauthorized external communication
+  events:
+  - event: "connect"
+    selectors:
+    # Match: TCP/UDP connections to external networks
+    - matchPolicies: ["external_connect"]
+      matchArgsOperator: "and"
+      matchArgs:
+      # Arg 0: Socket protocol
+      - index: 0
+        operator: "Equal"
+        values:
+        - "IPPROTO_TCP"
+        - "IPPROTO_UDP"
+      # Arg 1: Destination IP - exclude internal ranges
+      - index: 1
+        operator: "NotEqual"
+        values:
+        # Loopback
+        - "127.0.0.0/8"
+        # Private RFC1918
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+        # Link-local
+        - "169.254.0.0/16"
+        # Multicast
+        - "224.0.0.0/4"
+        # This network (0.0.0.0/8)
+        - "0.0.0.0/8"
+    actions:
+    - action: "WARN"  # WARN: log external connections
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - process_gid
+      - socket_family
+      - destination_address
+      - destination_port
+      - protocol
+      - return_code
+      - process_start_time
+      - process_kube_namespace
+      - process_kube_pod
+      - process_kube_container
+
+---
+# Policy for DNS queries (detect C&C domain resolution)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-dns-queries
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: network
+spec:
+  # Monitor DNS queries (domain resolution)
+  # Use case: Detect C&C callbacks, suspicious domain lookups
+  events:
+  - event: "dns_query"
+    selectors:
+    - matchPolicies: ["dns_lookup"]
+      matchArgs:
+      # Domain name pattern matching (if available)
+      - index: 0
+        operator: "Regex"
+        values:
+        # Match suspicious patterns
+        - ".*\\.bit$"           # Bit domains (often C&C)
+        - ".*dga.*"             # Domain Generation Algorithm domains
+        - ".*pastebin.*"        # Data exfil sites
+        - ".*webhook.*"         # Webhook callbacks
+    actions:
+    - action: "WARN"
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - domain_name
+      - query_type
+      - process_kube_pod
+
+---
+# Policy for monitoring specific ports (common exploit ports)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-suspicious-ports
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: network
+spec:
+  # Monitor connections to known exploit/backdoor ports
+  events:
+  - event: "connect"
+    selectors:
+    - matchPolicies: ["suspicious_ports"]
+      matchArgs:
+      # Destination port
+      - index: 2
+        operator: "Equal"
+        values:
+        # Backdoor ports
+        - "4444"  # Metasploit default
+        - "5555"  # Common backdoor
+        - "6666"  # Common backdoor
+        - "6667"  # IRC
+        - "31337" # Elite/Back Orifice
+        - "8888"  # Alternative HTTP backdoor
+        - "9999"  # Common backdoor
+    actions:
+    - action: "WARN"
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - destination_port
+      - destination_address
+      - process_kube_pod

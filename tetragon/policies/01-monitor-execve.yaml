@@ -1,0 +1,61 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-all-execve
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: execution
+spec:
+  # Monitor all process execution (execve syscall)
+  # Use case: Track all programs executed in cluster
+  events:
+  - event: "execve"
+    selectors:
+    - matchPolicies: ["always"]
+    actions:
+    - action: "ALLOW"  # Allow execution, but log it
+    output:
+      # Output fields for Loki ingestion
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - process_gid
+      - parent_process_name
+      - parent_process_pid
+      - process_kube_namespace
+      - process_kube_pod
+      - process_kube_container
+      - process_start_time
+      - args
+      - return_code
+
+---
+# Optional: Filter to only certain namespaces (reduces event volume)
+# Use this alternately if too many events
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-production-execve
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: execution
+spec:
+  # Monitor process execution only in production namespaces
+  events:
+  - event: "execve"
+    selectors:
+    - matchPolicies: ["production_ns"]
+      matchArgs:
+      # Filter by namespace labels (optional - requires pod metadata)
+      - index: 0
+        operator: "Equal"
+        values:
+        - "production"
+        - "prod"
+    actions:
+    - action: "ALLOW"

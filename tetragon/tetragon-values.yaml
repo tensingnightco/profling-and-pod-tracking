@@ -1,0 +1,30 @@
+crds:
+  installMethod: "operator"
+
+export:
+  mode: "stdout"
+  filenames:
+    - tetragon.log
+
+tetragonOperator:
+  prometheus:
+    enabled: false
+  
+rthooks:
+  enabled: false
+  interface: "nri-hook"
+
+tetragon:
+  resources:
+    requests:
+      cpu: 80m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 300Mi
+  cri:
+    enabled: false
+    socketHostPath: "/run/containerd/containerd.sock"
+  cgidmap:
+    enabled: false
+

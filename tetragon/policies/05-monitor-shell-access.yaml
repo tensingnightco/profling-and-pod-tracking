@@ -1,0 +1,75 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-shell-access
+spec:
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    args:
+    - index: 0
+      type: "string"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["/bin/bash"]
+      matchActions:
+      - action: Post
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["/bin/sh"]
+      matchActions:
+      - action: Post
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["/bin/zsh"]
+      matchActions:
+      - action: Post
+
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-ssh-access
+spec:
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    args:
+    - index: 0
+      type: "string"
+    selectors:
+    - matchBinaries:
+      - operator: "Equal" # Changed from In to Equal
+        values: ["/usr/sbin/sshd"]
+      matchActions:
+      - action: Post
+
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-kubectl-exec
+spec:
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    args:
+    - index: 0
+      type: "string"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["/bin/bash"]
+      matchActions:
+      - action: Post
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values: ["/bin/sh"]
+      matchActions:
+      - action: Post

@@ -1,0 +1,217 @@
+alloy:
+  resources:
+    limits:
+      memory: 900Mi
+      cpu: 500m
+    requests:
+      memory: 150Mi
+      cpu: 100m
+  securityContext:
+    privileged: true
+    readOnlyRootFilesystem: true
+  stabilityLevel: "public-preview"
+  mounts:
+    varlog: true
+    extra: 
+    - name: tetragon-logs
+      mountPath: /var/run/cilium/tetragon
+      readOnly: true
+    - name: debugfs
+      mountPath: /sys/kernel/debug
+      readOnly: false
+    - name: tmp
+      mountPath: /tmp # This makes /tmp writable
+    - name: proc
+      mountPath: /host/proc
+      readOnly: true
+  configMap:
+    create: true
+    name: 
+    content: |
+      // 1. Discover the Pyroscope service
+      discovery.kubernetes "pyroscope_service" {
+        role = "service"
+      }
+
+      // 2. Filter to find only the Pyroscope service
+      discovery.relabel "pyroscope_metrics" {
+        targets = discovery.kubernetes.pyroscope_service.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_service_name"]
+          regex         = "pyroscope" 
+          action        = "keep"
+        }
+      }
+
+      // 3. Scrape the metrics and send them to Prometheus/Loki
+      prometheus.scrape "pyroscope_internal" {
+        targets    = discovery.relabel.pyroscope_metrics.output
+        forward_to = [prometheus.remote_write.default.receiver]
+      }
+
+      // 4. Define where the metrics go (Assuming you have a Prometheus or Mimir endpoint)
+      prometheus.remote_write "default" {
+        endpoint {
+          url = "http://prometheus:9090/api/v1/write" 
+        }
+      }
+
+      // 1. Discovery k8s & relabelling 
+      discovery.kubernetes "k8s_pods" {
+        role = "pod"
+      }
+
+      discovery.relabel "filter_pods" {
+        targets = discovery.kubernetes.k8s_pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          regex = "kube-system|argocd|monitoring|kafka|elk|elk-dung"
+          action = "drop"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      // 2. EBPF profiler configuration
+      pyroscope.ebpf "profiler" {
+        targets = discovery.relabel.filter_pods.output
+        sample_rate = 20
+        forward_to = [pyroscope.write.profiling.receiver]
+      }
+
+      pyroscope.write "profiling" {
+        endpoint {
+          url = "http://pyroscope:4040"
+          tls_config {
+            insecure_skip_verify = true
+          }
+        }
+      }
+
+      // 4. Security event logs from Tetragon and Loki configuration
+      local.file_match "tetragon_logs" {
+        path_targets = [{
+          "__path__" = "/var/run/cilium/tetragon/tetragon.log",
+        }]
+      } 
+
+      loki.source.file "tetragon_source" {
+        targets = local.file_match.tetragon_logs.targets
+        forward_to = [loki.process.tetragon_parsing.receiver]
+      }
+
+      loki.process "tetragon_parsing" {
+        stage.json {
+          expressions = {
+            p_exec    = "process_exec",
+            p_kprobe  = "process_kprobe",
+            p_exec_ok = "process_exec",
+          }
+        }
+
+        // 1. Extract from EXEC (The Start)
+        stage.json {
+          source = "p_exec"
+          expressions = {
+            exec_bin    = "process.binary",
+            exec_uid    = "process.uid",
+            exec_parent = "parent.binary",
+          }
+        }
+
+        // 2. Extract from EXIT (The End - Like your Postgres log)
+        stage.json {
+          source = "p_exit"
+          expressions = {
+            exit_bin    = "process.binary",
+            exit_uid    = "process.uid",
+            exit_parent = "parent.binary",
+          }
+        }
+
+        // 3. Normalize with Templates (The "Fix")
+        stage.template {
+          source   = "final_binary"
+          template = "{{ if .exec_bin }}{{ .exec_bin }}{{ else }}{{ .exit_bin }}{{ end }}"
+        }
+
+        stage.template {
+          source   = "final_uid"
+          template = "{{ if .exec_uid }}{{ .exec_uid }}{{ else }}{{ .exit_uid }}{{ end }}"
+        }
+
+        stage.template {
+          source   = "final_parent"
+          template = "{{ if .exec_parent }}{{ .exec_parent }}{{ else if .exit_parent }}{{ .exit_parent }}{{ else }}system-init{{ end }}"
+        }
+
+        // 4. Output to Metadata
+        stage.structured_metadata {
+          values = {
+            binary = "final_binary",
+            uid    = "final_uid",
+            parent = "final_parent",
+          }
+        }
+        forward_to = [loki.write.loki_sink.receiver]
+      }
+      
+
+      loki.write "loki_sink" {
+        endpoint {
+          url = "http://loki-gateway/loki/api/v1/push"
+        }
+      }
+
+controller:
+  hostPID: true
+  volumes:
+    extra:
+      - name: tmp
+        emptyDir: {} # This creates a writable scratch space in RAM/Disk
+      - name: tetragon-logs
+        hostPath:
+          path: /var/run/cilium/tetragon
+          type: DirectoryOrCreate
+      - name: debugfs
+        hostPath:
+          path: /sys/kernel/debug
+          type: Directory
+      - name: proc
+        hostPath:
+          path: /proc
+
+configReloader:
+  resources:
+    requests:
+      memory: 10Mi
+      cpu: 50m
+
+networkPolicy:
+  enabled: false
+  flavor: kubernetes
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - {}
+  egress:
+    - {}
+

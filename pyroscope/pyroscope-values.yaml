@@ -1,0 +1,32 @@
+alloy:
+  enabled: false
+
+architecture:
+  storage:
+    v2: false
+  microservices:
+    enabled: false
+
+pyroscope:
+  replicaCount: 1
+  service:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "4040"
+      prometheus.io/path: "/metrics"
+  config: |
+    storage:
+      backend: s3
+      s3:
+        endpoint: s3.xorcloud.net
+        bucket_name: rustfs-tier
+        access_key_id: CBV9EVOGVK7B2QQDTGRO
+        secret_access_key: EPSR7nAKICASKtdJvnVbfjBBwOFuzS5bPOBkTilH
+        insecure: true
+  resources:
+    limits:
+      memory: 800Mi
+      cpu: 500m
+    requests:
+      memory: 256Mi
+      cpu: 100m

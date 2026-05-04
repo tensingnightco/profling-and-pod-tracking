@@ -1,0 +1,138 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: block-privilege-escalation-attempts
+  labels:
+    app: tetragon-policies
+    policy-category: privilege-escalation
+spec:
+  events:
+  - event: "execve"
+    selectors:
+    # Match: execution of privilege escalation tools by non-root
+    - matchPolicies: ["privesc_attempt"]
+      matchArgsOperator: "and"
+      matchArgs:
+      # Arg 0: Binary path
+      - index: 0
+        operator: "Prefix"
+        values:
+        - "/bin/sudo"
+        - "/usr/bin/sudo"
+        - "/bin/su"
+        - "/usr/bin/su"
+        - "/sbin/setcap"
+        - "/usr/sbin/setcap"
+        - "/usr/bin/sudo-l"
+        - "/usr/bin/sudo-v"
+      # Arg 1: Current UID != root (must be non-root)
+      - index: 1
+        operator: "NotEqual"
+        values:
+        - "0"  # root UID
+    actions:
+    - action: "DENY"     # DENY: block execution immediately
+    - action: "POST"     # POST: log event
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - process_gid
+      - args
+      - return_code
+      - process_kube_namespace
+      - process_kube_pod
+      - deny_reason
+
+---
+# Policy for detecting/blocking shell escapes
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-shell-escapes
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: privilege-escalation
+spec:
+  # Detect shell escapes from restricted environments
+  # Use case: Detect/block container breakouts, jailed shell escapes
+  events:
+  - event: "execve"
+    selectors:
+    # Match: certain programs that can escape jails
+    - matchPolicies: ["jail_escape"]
+      matchArgs:
+      - index: 0
+        operator: "Equal"
+        values:
+        - "/bin/vi"
+        - "/usr/bin/vi"
+        - "/usr/bin/vim"
+        - "/bin/nano"
+        - "/usr/bin/nano"
+        - "/usr/bin/less"
+        - "/usr/bin/more"
+        - "/bin/ed"
+        - "/bin/sed"
+        - "/bin/awk"
+        - "/usr/bin/perl"
+        - "/usr/bin/python"
+        - "/usr/bin/python3"
+        - "/usr/bin/ruby"
+        - "/usr/bin/node"
+    actions:
+    - action: "WARN"  # WARN: allow but monitor closely
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - args
+      - process_kube_pod
+      - process_start_time
+
+---
+# Policy for monitoring capability changes
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-capability-changes
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: privilege-escalation
+spec:
+  # Monitor/block capability modifications
+  # Use case: Detect dangerous capability assignments (CAP_ADMIN, etc.)
+  events:
+  - event: "capset"  # Capability set syscall
+    selectors:
+    # Match: setting privileged capabilities
+    - matchPolicies: ["dangerous_caps"]
+      matchArgs:
+      # Dangerous capabilities
+      - index: 0
+        operator: "Equal"
+        values:
+        - "CAP_SYS_ADMIN"      # Near-root privileges
+        - "CAP_SYS_MODULE"     # Load kernel modules
+        - "CAP_SYS_BOOT"       # Reboot
+        - "CAP_NET_ADMIN"      # Network admin
+        - "CAP_SYS_PTRACE"     # Trace processes
+    actions:
+    - action: "WARN"
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - capabilities
+      - process_kube_pod

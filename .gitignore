@@ -1,0 +1,8 @@
+.kconfig.txt
+.agents/
+pyroscope/*.yaml.bak
+pyroscope/*.yaml.bak.1
+tetragon/*.yaml.bak
+pyroscope/*.tgz
+tetragon/*.tgz
+dashboard/

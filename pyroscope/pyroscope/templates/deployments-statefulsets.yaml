@@ -1,0 +1,334 @@
+{{- $global := . }}
+{{- $components := (fromYaml (include "pyroscope.components" .)) }}
+{{- $hasV1 := $global.Values.architecture.storage.v1 }}
+{{- $hasV2 := $global.Values.architecture.storage.v2 }}
+{{- $hasMetastore := hasKey $components "metastore" }}
+{{- $hasQueryBackend := hasKey $components "query-backend" }}
+{{- range $component, $cfg := $components }}
+{{- with $global }}
+{{-  $values := mustMergeOverwrite (deepCopy .Values.pyroscope ) ($cfg | default dict)}}
+{{-  $extraArgs := mustMergeOverwrite (deepCopy .Values.pyroscope.extraArgs ) ($cfg.extraArgs | default dict)}}
+{{-  $isMetastore := or (and (eq $component "all") ($hasV2)) (eq $component "metastore") }}
+---
+apiVersion: apps/v1
+kind: {{ $cfg.kind }}
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pyroscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component | quote }}
+spec:
+{{- if eq $values.kind "StatefulSet" }}
+  serviceName: {{ $values.name }}-headless
+  podManagementPolicy: Parallel
+{{- end }}
+{{- if and (hasKey $values "replicaCount") (not ($values.autoscaling).enabled) }}
+  replicas: {{ $values.replicaCount }}
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "pyroscope.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ $component | quote }}
+  template:
+    metadata:
+      annotations:
+        {{- if not (hasKey $values.podAnnotations "checksum/config")  }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if not (hasKey $values.podAnnotations "profiles.grafana.com/service_repository")  }}
+        profiles.grafana.com/service_repository: "https://github.com/grafana/pyroscope"
+        {{- end }}
+        {{- if not (hasKey $values.podAnnotations "profiles.grafana.com/service_git_ref")  }}
+        profiles.grafana.com/service_git_ref: "v{{ .Chart.AppVersion }}"
+        {{- end }}
+        {{- with $values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "pyroscope.templateLabels" . | nindent 8 }}
+        app.kubernetes.io/component: {{ $component | quote }}
+        name: {{ if eq $component "all" }}"pyroscope"{{ else }}"{{ $component }}"{{ end }}
+    spec:
+      {{- with $values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "pyroscope.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml $values.podSecurityContext | nindent 8 }}
+      {{- if hasKey $values "hostNetwork" }}
+      hostNetwork: {{ $values.hostNetwork }}
+      {{- end }}
+      {{- if hasKey $values "dnsPolicy" }}
+      dnsPolicy: {{ $values.dnsPolicy }}
+      {{- end }}
+      {{- with $values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ if eq $component "all" }}"pyroscope"{{ else }}"{{ $component }}"{{ end }}
+          securityContext:
+            {{- toYaml $values.securityContext | nindent 12 }}
+          {{- $registry := $global.Values.global.imageRegistry | default $values.image.registry }}
+          image: "{{ if $registry }}{{ $registry }}/{{ end }}{{ $values.image.repository }}:{{ $values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ $values.image.pullPolicy }}
+          args:
+            - "-target={{ $component }}"
+            - "-self-profiling.disable-push={{ .Values.pyroscope.disableSelfProfile }}"
+            - "-server.http-listen-port={{ $values.service.port }}"
+            - "-memberlist.cluster-label={{ .Release.Namespace }}-{{ include "pyroscope.fullname" .}}{{if $global.Values.architecture.microservices.enabled}}{{$global.Values.architecture.microservices.clusterLabelSuffix}}{{end}}"
+            - "-memberlist.join=dns+{{ include "pyroscope.fullname" .}}-memberlist.{{ .Release.Namespace }}.svc{{ .Values.pyroscope.cluster_domain }}:{{ .Values.pyroscope.memberlist.port }}"
+            - "-config.file=/etc/pyroscope/config.yaml"
+            - "-runtime-config.file=/etc/pyroscope/overrides/overrides.yaml"
+          {{- range $key, $value := $extraArgs }}
+            - "-{{ $key }}={{ $value }}"
+          {{- end }}
+          {{- /* When v2 and single binary is used we need to explicitly configure "filesystem" (TODO: This should be the default in v2) */}}
+          {{- if and $hasV2 (eq $component "all") }}
+          {{-  if (not (hasKey $extraArgs "storage.backend")) }}
+            - "-storage.backend=filesystem"
+          {{- end }}
+          {{- end }}
+          {{- /* v2 specific options for all components */}}
+          {{- if $hasV2 }}
+          {{-  if (not (hasKey $extraArgs "query-backend.address"))  }}
+            - "-query-backend.address=dns:///_grpc._tcp.{{ include "pyroscope.fullname" . }}{{ if $hasQueryBackend }}-query-backend{{ end }}-headless.$(NAMESPACE_FQDN):{{ .Values.pyroscope.grpc.port }}"
+          {{- end }}
+          {{-  if (not (hasKey $extraArgs "metastore.address"))  }}
+            - "-metastore.address=kubernetes:///{{ include "pyroscope.fullname" . }}{{ if $hasMetastore }}-metastore{{ end }}-headless.$(NAMESPACE_FQDN):{{ .Values.pyroscope.grpc.port }}"
+          {{- end }}
+          {{- end }}
+          {{- /* metastore specific v2 migration config */}}
+          {{-  if $isMetastore }}
+          {{-  if (not (hasKey $extraArgs "metastore.raft.server-id"))  }}
+            - "-metastore.raft.bind-address=:{{ .Values.pyroscope.metastore.port }}"
+          {{- end }}
+          {{-  if (not (hasKey $extraArgs "metastore.raft.server-id"))  }}
+            - "-metastore.raft.server-id=$(POD_NAME).$(PYROSCOPE_METASTORE_SERVICE)"
+          {{- end }}
+          {{-  if (not (hasKey $extraArgs "metastore.raft.advertise-address"))  }}
+            - "-metastore.raft.advertise-address=$(POD_NAME).$(PYROSCOPE_METASTORE_SERVICE)"
+          {{- end }}
+          {{-  if (not (hasKey $extraArgs "metastore.raft.server-id"))  }}
+            - "-metastore.raft.bootstrap-peers=dnssrvnoa+_raft._tcp.$(PYROSCOPE_METASTORE_SERVICE)"
+          {{- end }}
+          {{- end }}
+          {{- /* distributor specific v1/v2 migration config */}}
+          {{-  if or (eq $component "all") (eq $component "distributor") }}
+          {{-  if and $hasV2 (not (hasKey $extraArgs "write-path"))  }}
+          {{-  if $hasV1 }}
+            - "-write-path=combined"
+          {{-  if not (hasKey $extraArgs "write-path.segment-writer-weight")  }}
+            - "-write-path.segment-writer-weight=1"
+          {{- end }}
+          {{- else }}
+            - "-write-path=segment-writer"
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- /* single-binary v2: disable v1 components when v1 storage is off */}}
+          {{- if and (eq $component "all") $hasV2 (not $hasV1) }}
+          {{-   if not (hasKey $extraArgs "all.enable-v1-write-path") }}
+            - "-all.enable-v1-write-path=false"
+          {{-   end }}
+          {{-   if not (hasKey $extraArgs "all.enable-v1-read-path") }}
+            - "-all.enable-v1-read-path=false"
+          {{-   end }}
+          {{- end }}
+          {{- /* query-frontend specific v1/v2 migration config */}}
+          {{- if or (eq $component "all") (eq $component "query-frontend") }}
+          {{-   if and $hasV2 (not (hasKey $extraArgs "enable-query-backend"))  }}
+          {{-     if and $hasV1 $global.Values.architecture.storage.migration.queryBackend }}
+            - "-enable-query-backend=true"
+          {{-       if and (not (hasKey $extraArgs "enable-query-backend-from")) $global.Values.architecture.storage.migration.queryBackendFrom }}
+            - "-enable-query-backend-from={{$global.Values.architecture.storage.migration.queryBackendFrom}}"
+          {{-       end }}
+          {{-     else }}
+            - "-enable-query-backend=true"
+          {{-     end }}
+          {{-   end }}
+          {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE_FQDN
+              value: "{{ .Release.Namespace }}.svc{{ .Values.pyroscope.cluster_domain }}"
+          {{- if and $hasV2 (not (hasKey $values.extraEnvVars "PYROSCOPE_V2_EXPERIMENT"))  }}
+            - name: PYROSCOPE_V2_EXPERIMENT
+              value: "1"
+          {{- end }}
+          {{- if and $hasV2 (not (hasKey $values.extraEnvVars "PYROSCOPE_METASTORE_SERVICE"))  }}
+            - name: PYROSCOPE_METASTORE_SERVICE
+              value: "{{ include "pyroscope.fullname" .}}{{ if $hasMetastore }}-metastore{{ end }}-headless.{{ .Release.Namespace }}.svc{{ .Values.pyroscope.cluster_domain }}:{{ .Values.pyroscope.metastore.port }}"
+          {{- end }}
+          {{- with $values.extraEnvVars }}
+          {{- range $key, $value := . }}
+            - name: {{ $key }}
+              {{- if kindIs "map" $value }}
+              {{- toYaml $value | nindent 14 }}
+              {{- else }}
+              value: {{ $value | quote }}
+              {{- end }}
+          {{- end }}
+          {{- end }}
+          {{- with $values.extraCustomEnvVars }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: {{ $values.service.port_name }}
+              containerPort: {{ $values.service.port }}
+              protocol: TCP
+            - name: {{ $values.memberlist.port_name }}
+              containerPort: {{ $values.memberlist.port }}
+              protocol: TCP
+          {{-  if $hasV2 }}
+            - name: {{ $values.grpc.port_name }}
+              containerPort: {{ $values.grpc.port }}
+              protocol: TCP
+          {{-  end }}
+          {{-  if $isMetastore }}
+            - name: {{ $values.metastore.port_name }}
+              containerPort: {{ $values.metastore.port }}
+              protocol: TCP
+          {{-  end }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ $values.service.port_name }}
+              scheme: {{ $values.service.scheme }}
+          {{- if ($values.readinessProbe).initialDelaySeconds }}
+            initialDelaySeconds: {{ $values.readinessProbe.initialDelaySeconds }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pyroscope/config.yaml
+              subPath: config.yaml
+            - name: overrides-config
+              mountPath: /etc/pyroscope/overrides/
+            - name: data
+              mountPath: /data
+            {{- if eq $component "compactor" }}
+              subPath: default
+            - name: data
+              mountPath: /data-compactor
+              subPath: compactor
+            {{- end }}
+            {{- if (and $hasV2 $values.persistence.shared.enabled) }}
+            - name: data
+              mountPath: /data-shared
+              subPath: {{ $values.persistence.shared.subPath }}
+            {{- end }}
+            {{- if $isMetastore }}
+            - name: data
+              mountPath: /data-metastore
+              subPath: {{ $values.persistence.metastore.subPath }}
+            {{- end }}
+            {{- with $values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- if $global.Values.architecture.overwriteResources }}
+            {{- toYaml $global.Values.architecture.overwriteResources | nindent 12 }}
+            {{- else }}
+            {{- toYaml $values.resources | nindent 12 }}
+            {{- end }}
+        {{- with $values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if hasKey $values "priorityClassName" }}
+      priorityClassName: {{ $values.priorityClassName | quote }}
+      {{- end }}
+      {{- if $values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ $values.terminationGracePeriodSeconds }}
+      {{- end }}
+      volumes:
+      {{- with $values.extraVolumes }}
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+        - name: config
+          configMap:
+            name: {{ include "pyroscope.fullname" . }}-config
+        - name: overrides-config
+          configMap:
+            name: {{ include "pyroscope.fullname" . }}-overrides-config
+  {{- $persistence := $values.persistence }}
+  {{- if not $persistence.enabled }}
+        - name: data
+          emptyDir: {}
+  {{- else if $persistence.existingClaim}}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $persistence.existingClaim }}
+  {{- else if ne $cfg.kind "StatefulSet"}}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $cfg.name }}-data
+  {{- else }}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      annotations:
+        {{- toYaml $persistence.annotations | nindent 8 }}
+    spec:
+      accessModes:
+        {{- toYaml $persistence.accessModes | nindent 8 }}
+      resources:
+        requests:
+          storage: {{ $persistence.size | quote }}
+      storageClassName: {{ $persistence.storageClassName }}
+      {{- if $persistence.selector }}
+      selector:
+        {{- toYaml $persistence.selector | nindent 8 }}
+      {{- end }}
+  {{- with $persistence.extraVolumeClaimTemplates }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+  {{- end }}
+---
+{{- $pdb := $values.podDisruptionBudget }}
+{{- if $pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pyroscope.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component | quote }}
+spec:
+  {{- if hasKey $pdb "minAvailable" }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "pyroscope.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ $component | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

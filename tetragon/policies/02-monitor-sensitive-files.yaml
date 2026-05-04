@@ -1,0 +1,87 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-sensitive-files
+  labels:
+    app: tetragon-policies
+    policy-category: file-access
+spec:
+  events:
+  - event: "vfs_write"
+    selectors:
+    # Match: writes to sensitive files
+    - matchPolicies: ["sensitive_writes"]
+      matchArgs:
+      # Argument index 0 = file path
+      - index: 0
+        operator: "Equal"
+        values:
+        # System sensitive files
+        - "/etc/passwd"
+        - "/etc/shadow"
+        - "/etc/sudoers"
+        - "/etc/sudoers.d/"
+        # SSH sensitive files
+        - "/root/.ssh/authorized_keys"
+        - "/root/.ssh/config"
+        - "/home/*/.ssh/authorized_keys"
+        # Application config (examples)
+        - "/app/config/production.yaml"
+        - "/app/secrets/apikeys.json"
+        - "/var/www/html/config.php"
+    actions:
+    - action: "WARN"  # WARN: allow write but log it prominently
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - process_gid
+      - file_path
+      - bytes_written
+      - return_code
+      - process_kube_namespace
+      - process_kube_pod
+      - process_kube_container
+      - process_start_time
+
+---
+# Policy for file READS (less sensitive than writes, but still monitor)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: monitor-sensitive-file-reads
+  namespace: tetragon
+  labels:
+    app: tetragon-policies
+    policy-category: file-access
+spec:
+  events:
+  - event: "vfs_open"
+    selectors:
+    - matchPolicies: ["sensitive_reads"]
+      matchArgs:
+      - index: 0  # File path
+        operator: "Equal"
+        values:
+        - "/etc/passwd"          # Could be used for user enumeration
+        - "/etc/shadow"          # Password hashes
+        - "/etc/ssh/ssh_config"  # SSH config
+        - "/root/.ssh/id_rsa"    # Private keys
+        - "/app/secrets/"        # Secrets directory
+        - "/var/www/html/"       # Web root
+    actions:
+    - action: "WARN"
+    output:
+      fields:
+      - event_type
+      - timestamp
+      - process_name
+      - process_pid
+      - process_uid
+      - file_path
+      - open_flags
+      - process_kube_pod
+      - process_start_time
