@@ -10,7 +10,7 @@ loki:
     replication_factor: 1
     path_prefix: /var/loki
   auth_enabled: false
-  storage:      
+  storage:
     bucketNames:
       chunks: "pod-tracking-chunks"
       ruler: "pod-tracking-ruler"
@@ -59,7 +59,7 @@ singleBinary:
   initContainers:
     - name: fix-permissions
       image: busybox
-      command: ["sh", "-c", "chown -R 10001:10001 /var/loki"]
+      command: [ "sh", "-c", "chown -R 10001:10001 /var/loki" ]
       securityContext:
         runAsUser: 0
       volumeMounts:
@@ -72,7 +72,7 @@ singleBinary:
   persistence:
     enableStatefulSetAutoDeletePVC: true
     accessModes:
-      - ReadWriteMany
+      - ReadWriteOnce
     size: 10Gi
     storageClass: csi-cinder-sc-retain
 

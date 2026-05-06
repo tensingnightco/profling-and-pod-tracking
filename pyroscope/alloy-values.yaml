@@ -12,21 +12,32 @@ alloy:
   stabilityLevel: "public-preview"
   mounts:
     varlog: true
-    extra: 
-    - name: tetragon-logs
-      mountPath: /var/run/cilium/tetragon
-      readOnly: true
-    - name: debugfs
-      mountPath: /sys/kernel/debug
-      readOnly: false
-    - name: tmp
-      mountPath: /tmp # This makes /tmp writable
-    - name: proc
-      mountPath: /host/proc
-      readOnly: true
+    extra:
+      - name: tetragon-logs
+        mountPath: /var/run/cilium/tetragon
+        readOnly: true
+      - name: debugfs
+        mountPath: /sys/kernel/debug
+        readOnly: false
+      - name: tmp
+        mountPath: /tmp # This makes /tmp writable
+      - name: proc
+        mountPath: /host/proc
+        readOnly: true
+      - name: bpf
+        mountPath: /sys/fs/bpf
+        readOnly: false
+      # ADD THIS: Writable cache for the Java Agent
+      - name: root-cache
+        mountPath: /root/.cache
+        readOnly: false
+      # ADD THIS: Writable cache for Loki's position files
+      - name: alloy-tmp
+        mountPath: /tmp/alloy
+        readOnly: false
   configMap:
     create: true
-    name: 
+    name:
     content: |
       // 1. Discover the Pyroscope service
       discovery.kubernetes "pyroscope_service" {
@@ -103,6 +114,63 @@ alloy:
         }
       }
 
+      // --------------------------------------------------
+      // TRACING PIPELINE (Now with embedded Beyla!)
+      // --------------------------------------------------
+
+      // 1. Embedded Beyla (eBPF Auto-instrumentation)
+      beyla.ebpf "auto_traces" {
+        attributes {
+          kubernetes { 
+            enable = "true" // Ensures traces get tagged with pod/namespace names
+          }
+        }
+        discovery {
+          services {
+            kubernetes {
+              // I left this broad so it discovers everything. 
+              // If it's too noisy, add: namespace = "keycloak" 
+            }
+          }
+        }
+        output {
+          // Send Beyla traces into the batch processor
+          traces = [otelcol.processor.batch.default.input]
+        }
+      }
+
+      // 2. Open the gates for external OTLP traces from your apps (Optional, but good practice)
+      otelcol.receiver.otlp "default" {
+        grpc {
+          endpoint = "0.0.0.0:4317"
+        }
+        http {
+          endpoint = "0.0.0.0:4318"
+        }
+        output {
+          traces  = [otelcol.processor.batch.default.input]
+        }
+      }
+
+      // 3. Batch them up (keeps the network happy)
+      otelcol.processor.batch "default" {
+        output {
+          traces  = [otelcol.exporter.otlp.tempo.input]
+        }
+      }
+
+      // 4. Ship them to your new Tempo binary
+      otelcol.exporter.otlp "tempo" {
+        client {
+          // Make sure this matches your Tempo service name!
+          endpoint = "http://tempo:4317"
+          tls {
+            insecure             = true
+            insecure_skip_verify = true
+          }
+        }
+      }
+
       // 4. Security event logs from Tetragon and Loki configuration
       local.file_match "tetragon_logs" {
         path_targets = [{
@@ -170,7 +238,7 @@ alloy:
         }
         forward_to = [loki.write.loki_sink.receiver]
       }
-      
+
 
       loki.write "loki_sink" {
         endpoint {
@@ -195,6 +263,14 @@ controller:
       - name: proc
         hostPath:
           path: /proc
+      - name: bpf
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      - name: root-cache
+        emptyDir: {}
+      - name: alloy-tmp
+        emptyDir: {}
 
 configReloader:
   resources:
@@ -214,4 +290,3 @@ networkPolicy:
     - {}
   egress:
     - {}
-

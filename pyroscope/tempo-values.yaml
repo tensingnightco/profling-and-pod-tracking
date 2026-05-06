@@ -1,0 +1,24 @@
+tempo:
+  memBallastSizeMbs: 1024
+  overrides:
+    defaults:
+      global:
+        max_bytes_per_trace: 15e+06
+  querier:
+    max_concurrent_queries: 20
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "500m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+  storage:
+    trace:
+      backend: s3
+      s3:
+        endpoint: s3.xorcloud.net
+        bucket: trace-tempo
+        access_key: CBV9EVOGVK7B2QQDTGRO
+        secret_key: EPSR7nAKICASKtdJvnVbfjBBwOFuzS5bPOBkTilH
+        insecure: false
