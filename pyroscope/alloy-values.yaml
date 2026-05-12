@@ -1,4 +1,6 @@
 alloy:
+  extraArgs:
+    - --storage.path=/tmp/alloy
   resources:
     limits:
       memory: 900Mi
@@ -8,14 +10,18 @@ alloy:
       cpu: 100m
   securityContext:
     privileged: true
-    readOnlyRootFilesystem: true
+    runAsUser: 0
+    runAsGroup: 0
+    capabilities:
+      add: [ "CAP_DAC_READ_SEARCH", "CAP_SYS_PTRACE" ]
   stabilityLevel: "public-preview"
   mounts:
     varlog: true
     extra:
       - name: tetragon-logs
         mountPath: /var/run/cilium/tetragon
-        readOnly: true
+        readOnly: false
+        mountPropagation: HostToContainer
       - name: debugfs
         mountPath: /sys/kernel/debug
         readOnly: false
@@ -78,8 +84,13 @@ alloy:
 
         rule {
           source_labels = ["__meta_kubernetes_namespace"]
-          regex = "kube-system|argocd|monitoring|kafka|elk|elk-dung"
+          regex = "kube-system|argocd|monitoring|elk|elk-dung"
           action = "drop"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "service_name"
         }
 
         rule {
@@ -93,15 +104,16 @@ alloy:
         }
 
         rule {
-          source_labels = ["__meta_kubernetes_pod_label_app"]
-          target_label  = "app"
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
         }
       }
 
       // 2. EBPF profiler configuration
       pyroscope.ebpf "profiler" {
+        python_enabled = true
         targets = discovery.relabel.filter_pods.output
-        sample_rate = 20
+        sample_rate = 23
         forward_to = [pyroscope.write.profiling.receiver]
       }
 
@@ -114,10 +126,6 @@ alloy:
         }
       }
 
-      // --------------------------------------------------
-      // TRACING PIPELINE (Now with embedded Beyla!)
-      // --------------------------------------------------
-
       // 1. Embedded Beyla (eBPF Auto-instrumentation)
       beyla.ebpf "auto_traces" {
         attributes {
@@ -126,11 +134,8 @@ alloy:
           }
         }
         discovery {
-          services {
-            kubernetes {
-              // I left this broad so it discovers everything. 
-              // If it's too noisy, add: namespace = "keycloak" 
-            }
+          instrument {
+            kubernetes {}
           }
         }
         output {
@@ -175,6 +180,8 @@ alloy:
       local.file_match "tetragon_logs" {
         path_targets = [{
           "__path__" = "/var/run/cilium/tetragon/tetragon.log",
+          "job"          = "tetragon",
+          "service_name" = "tetragon-pod-tracking",
         }]
       } 
 
@@ -184,65 +191,73 @@ alloy:
       }
 
       loki.process "tetragon_parsing" {
+        stage.drop {
+          expression = "^[^{]"
+        }
+
         stage.json {
           expressions = {
-            p_exec    = "process_exec",
-            p_kprobe  = "process_kprobe",
-            p_exec_ok = "process_exec",
+            event_type = "$.process_kprobe.function_name", 
+            net_event  = "$.process_tracepoint.event",
+            msg        = "$.message",
+            exec_ns    = "$.process_exec.process.pod.namespace",
+            exec_pod   = "$.process_exec.process.pod.name",
+            exec_bin   = "$.process_exec.process.binary",
+            file_path  = "$.process_kprobe.args[0].filename_arg",
+            dest_ip    = "$.process_tracepoint.args[2].sockaddr_arg.ip",
+            dest_port  = "$.process_tracepoint.args[1].int_arg",
+            
+            // FIX: Dig into the nested paths for the policy names
+            kprobe_policy = "$.process_kprobe.policy_name",
+            trace_policy  = "$.process_tracepoint.policy_name",
           }
         }
 
-        // 1. Extract from EXEC (The Start)
-        stage.json {
-          source = "p_exec"
-          expressions = {
-            exec_bin    = "process.binary",
-            exec_uid    = "process.uid",
-            exec_parent = "parent.binary",
-          }
-        }
-
-        // 2. Extract from EXIT (The End - Like your Postgres log)
-        stage.json {
-          source = "p_exit"
-          expressions = {
-            exit_bin    = "process.binary",
-            exit_uid    = "process.uid",
-            exit_parent = "parent.binary",
-          }
-        }
-
-        // 3. Normalize with Templates (The "Fix")
+        // FIX: Merge the nested policy variables
         stage.template {
-          source   = "final_binary"
-          template = "{{ if .exec_bin }}{{ .exec_bin }}{{ else }}{{ .exit_bin }}{{ end }}"
+          source   = "active_policy"
+          template = "{{ "{{" }} or .kprobe_policy .trace_policy \"\" }}"
         }
 
+        // 1. Fixed Fallback Labels
         stage.template {
-          source   = "final_uid"
-          template = "{{ if .exec_uid }}{{ .exec_uid }}{{ else }}{{ .exit_uid }}{{ end }}"
+          source   = "ns"
+          template = "{{ "{{" }} or .exec_ns \"system-kernel\" }}"
         }
-
         stage.template {
-          source   = "final_parent"
-          template = "{{ if .exec_parent }}{{ .exec_parent }}{{ else if .exit_parent }}{{ .exit_parent }}{{ else }}system-init{{ end }}"
+          source   = "p"
+          template = "{{ "{{" }} or .exec_pod \"host-level\" }}"
+        }
+        stage.template {
+          source   = "category"
+          template = "{{ "{{" }} if .event_type }}file-io{{ "{{" }} else if .net_event }}network{{ "{{" }} else }}process{{ "{{" }} end }}"
         }
 
-        // 4. Output to Metadata
-        stage.structured_metadata {
+        stage.labels {
           values = {
-            binary = "final_binary",
-            uid    = "final_uid",
-            parent = "final_parent",
+            namespace = "ns",
+            pod       = "p",
+            event_cat = "category",
+            tracing_policy = "active_policy", // FIX: Apply the merged variable to the label
           }
         }
+
+        // 2. Fixed Unified Message Output
+        stage.template {
+          source = "human_msg"
+          template = "[{{ "{{" }} .category | upper }}] {{ "{{" }} if eq .category \"file-io\" }}Action: {{ "{{" }} .event_type }} on {{ "{{" }} .file_path }}{{ "{{" }} else if eq .category \"network\" }}Connect to {{ "{{" }} .dest_ip }}:{{ "{{" }} .dest_port }}{{ "{{" }} else }}Process {{ "{{" }} .exec_bin }} spawned{{ "{{" }} end }} - Alert: {{ "{{" }} .msg | default \"None\" }}"
+        }
+        
+        stage.output {
+          source = "human_msg"
+        }
+
         forward_to = [loki.write.loki_sink.receiver]
       }
 
-
       loki.write "loki_sink" {
         endpoint {
-          url = "http://loki-gateway/loki/api/v1/push"
+          url = "http://loki-gateway:80/loki/api/v1/push"
         }
       }
 
