@@ -1,18 +1,18 @@
 tempo:
-  memBallastSizeMbs: 1024
+  memBallastSizeMbs: 256
   overrides:
     defaults:
       global:
-        max_bytes_per_trace: 15e+06
+        max_bytes_per_trace: 5e+6
   querier:
-    max_concurrent_queries: 20
+    max_concurrent_queries: 5
   resources:
     requests:
       memory: "2Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
-      cpu: "2000m"
+      memory: "3Gi"
+      cpu: "1500m"
   storage:
     trace:
       backend: s3

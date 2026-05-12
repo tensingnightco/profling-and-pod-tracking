@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trace-profile-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trace-profile-demo-config
+  namespace: thanhhc
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "tempo.monitoring.svc.cluster.local:4317"  # Update with your tempo namespace
+  PYROSCOPE_SERVER_ADDRESS: "http://pyroscope.monitoring.svc.cluster.local:4040"  # Update with your pyroscope namespace
+  OTEL_SERVICE_NAME: "trace-profile-demo"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-profile-demo
+  namespace: thanhhc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trace-profile-demo
+  template:
+    metadata:
+      labels:
+        app: trace-profile-demo
+      annotations:
+        pyroscope.io/scrape: "true"
+        pyroscope.io/port: "8080"
+        pyroscope.io/application-name: "trace-profile-demo"
+    spec:
+      containers:
+      - name: app
+        image: tensingnightco/trace-profile-demo:1.0.1  # CHANGE THIS
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: trace-profile-demo-config
+              key: OTEL_EXPORTER_OTLP_ENDPOINT
+        - name: PYROSCOPE_SERVER_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: trace-profile-demo-config
+              key: PYROSCOPE_SERVER_ADDRESS
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trace-profile-demo
+  namespace: thanhhc
+spec:
+  selector:
+    app: trace-profile-demo
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: thanhhc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      containers:
+      - name: loader
+        image: curlimages/curl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Starting continuous load generation..."
+          while true; do
+            curl -s -o /dev/null http://trace-profile-demo:8080/hello
+            curl -s -o /dev/null http://trace-profile-demo:8080/fib
+            curl -s -o /dev/null http://trace-profile-demo:8080/cpu-heavy
+            echo "Load sent at $$(date)"
+            sleep 2
+          done

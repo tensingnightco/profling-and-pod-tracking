@@ -10,6 +10,10 @@ loki:
     replication_factor: 1
     path_prefix: /var/loki
   auth_enabled: false
+  ingester:
+    chunk_idle_period: 1h
+    max_chunk_age: 1h
+    chunk_target_size: 1572864
   storage:
     bucketNames:
       chunks: "pod-tracking-chunks"
@@ -22,6 +26,10 @@ loki:
       accessKeyId: CBV9EVOGVK7B2QQDTGRO
       s3ForcePathStyle: true
       insecure: true
+      backoff_config:
+        min_period: 2s
+        max_period: 15s
+        max_retries: 5
   schemaConfig:
     configs:
       - from: "2024-04-01"
@@ -31,10 +39,6 @@ loki:
         index:
           prefix: loki_index_
           period: 24h
-  storage_config:
-    aws:
-      bucketnames: "pod-tracking-chunks"
-      s3forcepathstyle: true
   limits_config:
     retention_period: 168h
     reject_old_samples_max_age: 168h

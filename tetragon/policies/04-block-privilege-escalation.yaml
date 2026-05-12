@@ -6,14 +6,20 @@ metadata:
     app: tetragon-policies
     policy-category: privilege-escalation
 spec:
-  events:
-  - event: "execve"
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    # The 'message' field is the correct way to add info to events
+    message: "Detected privilege escalation attempt"
+    args:
+    - index: 0
+      type: "string"
+    - index: 1
+      type: "string"
+    - index: 2
+      type: "string"
     selectors:
-    # Match: execution of privilege escalation tools by non-root
-    - matchPolicies: ["privesc_attempt"]
-      matchArgsOperator: "and"
-      matchArgs:
-      # Arg 0: Binary path
+    - matchArgs:
       - index: 0
         operator: "Prefix"
         values:
@@ -23,49 +29,29 @@ spec:
         - "/usr/bin/su"
         - "/sbin/setcap"
         - "/usr/sbin/setcap"
-        - "/usr/bin/sudo-l"
-        - "/usr/bin/sudo-v"
-      # Arg 1: Current UID != root (must be non-root)
-      - index: 1
-        operator: "NotEqual"
-        values:
-        - "0"  # root UID
-    actions:
-    - action: "DENY"     # DENY: block execution immediately
-    - action: "POST"     # POST: log event
-    output:
-      fields:
-      - event_type
-      - timestamp
-      - process_name
-      - process_pid
-      - process_uid
-      - process_gid
-      - args
-      - return_code
-      - process_kube_namespace
-      - process_kube_pod
-      - deny_reason
+      matchActions:
+      - action: Sigkill
+      - action: Post
 
 ---
-# Policy for detecting/blocking shell escapes
+# Policy for monitoring shell escape attempts
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
   name: monitor-shell-escapes
-  namespace: tetragon
   labels:
     app: tetragon-policies
     policy-category: privilege-escalation
 spec:
-  # Detect shell escapes from restricted environments
-  # Use case: Detect/block container breakouts, jailed shell escapes
-  events:
-  - event: "execve"
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    message: "Potential shell escape detected"
+    args:
+    - index: 0
+      type: "string"
     selectors:
-    # Match: certain programs that can escape jails
-    - matchPolicies: ["jail_escape"]
-      matchArgs:
+    - matchArgs:
       - index: 0
         operator: "Equal"
         values:
@@ -84,18 +70,9 @@ spec:
         - "/usr/bin/python3"
         - "/usr/bin/ruby"
         - "/usr/bin/node"
-    actions:
-    - action: "WARN"  # WARN: allow but monitor closely
-    output:
-      fields:
-      - event_type
-      - timestamp
-      - process_name
-      - process_pid
-      - process_uid
-      - args
-      - process_kube_pod
-      - process_start_time
+      matchActions:
+      - action: Post
+        rateLimit: "1m"
 
 ---
 # Policy for monitoring capability changes
@@ -103,36 +80,24 @@ apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
   name: monitor-capability-changes
-  namespace: tetragon
   labels:
     app: tetragon-policies
     policy-category: privilege-escalation
 spec:
-  # Monitor/block capability modifications
-  # Use case: Detect dangerous capability assignments (CAP_ADMIN, etc.)
-  events:
-  - event: "capset"  # Capability set syscall
+  kprobes:
+  - call: "capset"
+    syscall: true
+    message: "Capability change detected"
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "int"
+    - index: 2
+      type: "int"
+    - index: 3
+      type: "string"
     selectors:
-    # Match: setting privileged capabilities
-    - matchPolicies: ["dangerous_caps"]
-      matchArgs:
-      # Dangerous capabilities
-      - index: 0
-        operator: "Equal"
-        values:
-        - "CAP_SYS_ADMIN"      # Near-root privileges
-        - "CAP_SYS_MODULE"     # Load kernel modules
-        - "CAP_SYS_BOOT"       # Reboot
-        - "CAP_NET_ADMIN"      # Network admin
-        - "CAP_SYS_PTRACE"     # Trace processes
-    actions:
-    - action: "WARN"
-    output:
-      fields:
-      - event_type
-      - timestamp
-      - process_name
-      - process_pid
-      - process_uid
-      - capabilities
-      - process_kube_pod
+    - matchActions:
+      - action: Post
+        rateLimit: "1m"

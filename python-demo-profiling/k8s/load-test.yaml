@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-load-generator
+  namespace: trace-profile-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-load-generator
+  template:
+    metadata:
+      labels:
+        app: python-load-generator
+    spec:
+      containers:
+        - name: loader
+          image: curlimages/curl:latest
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "🚀 Starting Python app load generator..."
+
+              # Service endpoint
+              SERVICE="http://python-demo-app:8080"
+
+              while true; do
+                # Hit CPU-intensive endpoints
+                echo ">>> Hitting /fib?n=35"
+                curl -s -o /dev/null -w "  /fib: %{http_code}\n" "${SERVICE}/fib?n=35"
+                
+                echo ">>> Hitting /primes?limit=50000"
+                curl -s -o /dev/null -w "  /primes: %{http_code}\n" "${SERVICE}/primes?limit=50000"
+                
+                echo ">>> Hitting /matrix?size=50"
+                curl -s -o /dev/null -w "  /matrix: %{http_code}\n" "${SERVICE}/matrix?size=50"
+                
+                echo ">>> Hitting /hash?size=2048"
+                curl -s -o /dev/null -w "  /hash: %{http_code}\n" "${SERVICE}/hash?size=2048"
+                
+                echo ">>> Hitting /json-heavy?iterations=3"
+                curl -s -o /dev/null -w "  /json-heavy: %{http_code}\n" "${SERVICE}/json-heavy?iterations=3"
+                
+                echo ">>> Hitting /mixed"
+                curl -s -o /dev/null -w "  /mixed: %{http_code}\n" "${SERVICE}/mixed"
+                
+                echo ">>> Hitting /parallel?tasks=4"
+                curl -s -o /dev/null -w "  /parallel: %{http_code}\n" "${SERVICE}/parallel?tasks=4"
+                
+                # Randomly hit error endpoints (30% chance)
+                if [ $((RANDOM % 10)) -lt 3 ]; then
+                  ERROR_TYPES="exception division keyerror typeerror database memory timeout"
+                  for err in $ERROR_TYPES; do
+                    echo ">>> Hitting /error?type=${err}"
+                    curl -s -o /dev/null -w "  /error(${err}): %{http_code}\n" "${SERVICE}/error?type=${err}"
+                    sleep 1
+                  done
+                fi
+                
+                # Occasionally hit stress endpoint (10% chance)
+                if [ $((RANDOM % 10)) -eq 0 ]; then
+                  echo ">>> Hitting /stress?intensity=1"
+                  curl -s -o /dev/null -w "  /stress: %{http_code}\n" "${SERVICE}/stress?intensity=1"
+                fi
+                
+                echo "--- Cycle completed at $(date) ---"
+                sleep 5
+              done
